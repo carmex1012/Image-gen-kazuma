@@ -1,6 +1,7 @@
 /* eslint-disable no-undef */
 import { extension_settings, getContext } from "../../../extensions.js";
 import { saveSettingsDebounced, generateQuietPrompt, saveChat, reloadCurrentChat, eventSource, event_types, addOneMessage, getRequestHeaders, appendMediaToMessage, substituteParams, getCurrentChatId, getThumbnailUrl } from "../../../../script.js";
+import { getWorldInfoPrompt } from "../../../../world-info.js";
 import { saveBase64AsFile } from "../../../utils.js";
 import { humanizedDateTime } from "../../../RossAscends-mods.js";
 import { Popup, POPUP_TYPE } from "../../../popup.js";
@@ -418,7 +419,7 @@ async function editImageGenPreset(presetName = null) {
     <input type="number" class="text_pole kazuma_preset_msg_count" value="${preset.includeLastMessages}" min="0" max="50" style="width:100px;">
     </div>
     <div>
-    <label><b>System Prompt (placeholders: <code>{{char_name}}</code>, <code>{{char_description}}</code>, <code>{{char_personality}}</code>, <code>{{char_scenario}}</code>, <code>{{group_info}}</code>, <code>{{summaryception}}</code>, <code>{{perspective}}</code>, <code>{{prompt_style}}</code>, <code>{{tracker}}</code>, <code>{{scene}}</code>, <code>{{prompt_extra}}</code>):</b></label>
+    <label><b>System Prompt (placeholders: <code>{{char_name}}</code>, <code>{{char_description}}</code>, <code>{{char_personality}}</code>, <code>{{char_scenario}}</code>, <code>{{group_info}}</code>, <code>{{summaryception}}</code>, <code>{{world_info}}</code>, <code>{{perspective}}</code>, <code>{{prompt_style}}</code>, <code>{{tracker}}</code>, <code>{{scene}}</code>, <code>{{prompt_extra}}</code>):</b></label>
     <textarea class="text_pole kazuma_preset_system" rows="8" style="width:100%;font-family:monospace;font-size:12px;">${preset.systemPrompt || ''}</textarea>
     <div class="menu_button kazuma_preset_reset_system" style="margin-top:4px;">Restore built-in default</div>
     </div>
@@ -946,7 +947,25 @@ async function onGeneratePrompt(customOptions = {}) {
     try {
         toastr.info("Visualizing...", "Image Gen Kazuma");
 
-        const instruction = buildSystemPromptFromPreset(customOptions);
+        let instruction = buildSystemPromptFromPreset(customOptions);
+
+        if (instruction && instruction.includes("{{world_info}}")) {
+            try {
+                // Get the recent history as a flat array of text strings for ST to scan
+                const chatHistory = buildChatHistoryFromPreset(customOptions);
+                const chatStrings = chatHistory.map(m => m.content);
+                
+                const wiResult = await getWorldInfoPrompt(chatStrings, 0, false);
+                const wiText = (wiResult && typeof wiResult === 'object') ? 
+                               (wiResult.worldInfoString || wiResult.worldInfoBefore || "") : 
+                               (typeof wiResult === 'string' ? wiResult : "");
+                
+                instruction = instruction.replace(/\{\{world_info\}\}/gi, wiText);
+            } catch (e) {
+                console.warn("Failed to generate world info prompt for imagekazuma", e);
+                instruction = instruction.replace(/\{\{world_info\}\}/gi, "");
+            }
+        }
 
         let generatedText;
         if (useOwnProfile) {
