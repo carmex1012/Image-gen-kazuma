@@ -947,7 +947,7 @@ async function onGeneratePrompt(customOptions = {}) {
     try {
         toastr.info("Visualizing...", "Image Gen Kazuma");
 
-        let instruction = buildSystemPromptFromPreset(customOptions);
+        let instruction = customOptions.overrideInstruction || buildSystemPromptFromPreset(customOptions);
 
         if (instruction && instruction.includes("{{world_info}}")) {
             try {
@@ -1033,7 +1033,7 @@ async function onGeneratePrompt(customOptions = {}) {
         }
 
         console.log("[DEBUG KAZUMA] Calling generateWithComfy. Target is:", target);
-        await generateWithComfy(generatedText, target);
+        await generateWithComfy(generatedText, target, instruction);
 
     } catch (err) {
         // [HIDE PROGRESS ON ERROR]
@@ -1044,7 +1044,7 @@ async function onGeneratePrompt(customOptions = {}) {
     }
 }
 
-async function generateWithComfy(positivePrompt, target = null) {
+async function generateWithComfy(positivePrompt, target = null, originalInstruction = null) {
     console.log("[DEBUG KAZUMA] Inside generateWithComfy. Target received:", target);
     if (target) {
         console.log("[DEBUG KAZUMA] generateWithComfy target.element is jQuery:", target.element instanceof $);
@@ -1077,7 +1077,7 @@ async function generateWithComfy(positivePrompt, target = null) {
         if(!res.ok) throw new Error("Failed");
         const data = await res.json();
         console.log(`[${extensionName}] queued prompt_id=${data.prompt_id}`);
-        await waitForGeneration(url, data.prompt_id, positivePrompt, target);
+        await waitForGeneration(url, data.prompt_id, positivePrompt, target, originalInstruction);
     } catch(e) { toastr.error("Comfy Error: " + e.message); }
 }
 
@@ -1172,7 +1172,7 @@ async function onImageSwiped(data) {
 // queue cleared) polls until the tab closes.
 const MAX_POLL_TICKS = 1200;
 
-async function waitForGeneration(baseUrl, promptId, positivePrompt, target) {
+async function waitForGeneration(baseUrl, promptId, positivePrompt, target, originalInstruction) {
     // [UPDATE TEXT]
     showKazumaProgress("Rendering Image...");
 
@@ -1224,7 +1224,7 @@ async function waitForGeneration(baseUrl, promptId, positivePrompt, target) {
 
                         console.log(`[${extensionName}] complete prompt_id=${promptId} file=${finalImage.filename}`);
                         const imgUrl = `${baseUrl}/view?filename=${finalImage.filename}&subfolder=${finalImage.subfolder}&type=${finalImage.type}`;
-                        await insertImageToChat(imgUrl, positivePrompt, target, originChatId);
+                        await insertImageToChat(imgUrl, positivePrompt, target, originChatId, originalInstruction);
                     } else {
                         console.warn(`[${extensionName}] no images in output for prompt_id=${promptId}`);
                     }
@@ -1254,7 +1254,7 @@ function compressImage(base64Str, quality = 0.9) {
 }
 
 // --- SAVE TO SERVER ---
-async function insertImageToChat(imgUrl, promptText, target = null, originChatId = getCurrentChatId()) {
+async function insertImageToChat(imgUrl, promptText, target = null, originChatId = getCurrentChatId(), originalInstruction = null) {
     try {
         toastr.info("Downloading image...", "Image Gen Kazuma");
         const response = await fetch(imgUrl);
@@ -1287,6 +1287,9 @@ async function insertImageToChat(imgUrl, promptText, target = null, originChatId
             title: promptText,
             generation_type: "free",
         };
+        if (originalInstruction) {
+            mediaAttachment.instruction = originalInstruction;
+        }
 
         // Downloading, compressing and saving the image took a while. If the user switched chats in
         // the meantime, target.message points into the old chat array and saveChat() would write the
@@ -1579,6 +1582,51 @@ jQuery(async () => {
                 $(this).css('position', 'relative');
             }
             $(this).append($btn);
+
+            const mesIdForLlm = $(this).closest('.mes').attr('mesid');
+            const msgForLlm = getContext().chat && getContext().chat[mesIdForLlm];
+            if (msgForLlm && msgForLlm.extra && msgForLlm.extra.media) {
+                const imgUrlForLlm = $(this).find('img').attr('src');
+                let attachment = msgForLlm.extra.media.find(m => imgUrlForLlm && (imgUrlForLlm.includes(m.url) || m.url.includes(imgUrlForLlm)));
+                if (!attachment) attachment = msgForLlm.extra.media[msgForLlm.extra.media.length - 1];
+                
+                if (attachment && attachment.instruction) {
+                    const $btnLlm = $('<div class="kazuma_llm_regen_btn interactable" title="Edit LLM Prompt & Re-roll Image" style="position: absolute; top: 8px; right: 80px; z-index: 100; opacity: 0; padding: 6px; font-size: 14px; border-radius: 5px; background: var(--SmartThemeBlurTintColor); color: var(--SmartThemeBodyColor); backdrop-filter: blur(5px); cursor: pointer; display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; transition: opacity 0.2s;"><i class="fa-solid fa-wand-magic-sparkles"></i></div>');
+                    
+                    $(this).on('mouseenter', function() { $btnLlm.css('opacity', '0.7'); });
+                    $(this).on('mouseleave', function() { $btnLlm.css('opacity', '0'); });
+                    $btnLlm.on('mouseenter', function() { $(this).css('opacity', '1'); });
+                    
+                    $btnLlm.on('click', async function(e) {
+                        e.preventDefault(); e.stopPropagation();
+                        
+                        const $content = $(`
+                            <div style="display: flex; flex-direction: column; gap: 10px;">
+                            <p><b>Edit LLM request prompt and add image to the current gallery:</b></p>
+                            <textarea class="text_pole kazuma_regen_text" rows="8" style="width:100%; resize:vertical; font-family:monospace;">${attachment.instruction}</textarea>
+                            </div>
+                        `);
+
+                        let editedPrompt = attachment.instruction;
+                        $content.find('.kazuma_regen_text').on('input', function() { editedPrompt = $(this).val(); });
+
+                        const popup = new Popup($content, POPUP_TYPE.CONFIRM, "Edit LLM Prompt", { okButton: "Generate", cancelButton: "Cancel" });
+                        const confirmed = await popup.show();
+
+                        if (confirmed) {
+                            const finalPrompt = editedPrompt.trim();
+                            if (!finalPrompt) return;
+                            
+                            onGeneratePrompt({
+                                targetMesId: parseInt(mesIdForLlm, 10),
+                                overrideInstruction: finalPrompt
+                            });
+                        }
+                    });
+                    
+                    $(this).append($btnLlm);
+                }
+            }
         });
 
         // NATIVE CHAT OVERSWIPE INTERCEPTION
@@ -2471,7 +2519,20 @@ async function importLorasFromWorkflow() {
                             $modalImg.attr('src', newSrc);
                             
                             // Update the text prompt overlay in the Lightbox to match the new image
-                            const newTitle = $currentImg.length ? $currentImg.attr('title') : sourceImage.attr('title');
+                            let newTitle = $currentImg.length ? $currentImg.attr('title') : sourceImage.attr('title');
+                            
+                            const modalMesId = $mes.attr('mesid');
+                            if (modalMesId) {
+                                const msg = getContext().chat[modalMesId];
+                                if (msg && msg.extra && msg.extra.media) {
+                                    let attachment = msg.extra.media.find(m => newSrc && (newSrc.includes(m.url) || m.url.includes(newSrc)));
+                                    if (!attachment) attachment = msg.extra.media[msg.extra.media.length - 1];
+                                    if (attachment && attachment.instruction) {
+                                        newTitle = `=== LLM REQUEST PROMPT ===\n${attachment.instruction}\n\n=== COMFYUI PROMPT ===\n${newTitle}`;
+                                    }
+                                }
+                            }
+
                             if (newTitle) {
                                 const $titleCode = $modal.find('.img_enlarged_title');
                                 if ($titleCode.length) {
