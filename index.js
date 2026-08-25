@@ -1,6 +1,6 @@
 /* eslint-disable no-undef */
 import { extension_settings, getContext } from "../../../extensions.js";
-import { saveSettingsDebounced, generateQuietPrompt, saveChat, reloadCurrentChat, eventSource, event_types, addOneMessage, getRequestHeaders, appendMediaToMessage, substituteParams, getCurrentChatId, getThumbnailUrl } from "../../../../script.js";
+import { max_context, saveSettingsDebounced, generateQuietPrompt, saveChat, reloadCurrentChat, eventSource, event_types, addOneMessage, getRequestHeaders, appendMediaToMessage, substituteParams, getCurrentChatId, getThumbnailUrl } from "../../../../script.js";
 import { getWorldInfoPrompt } from "../../../world-info.js";
 import { saveBase64AsFile } from "../../../utils.js";
 import { humanizedDateTime } from "../../../RossAscends-mods.js";
@@ -952,10 +952,11 @@ async function onGeneratePrompt(customOptions = {}) {
         if (instruction && instruction.includes("{{world_info}}")) {
             try {
                 // Get the recent history as a flat array of text strings for ST to scan
+                // ST expects depth 0 to be the NEWEST message, so we must reverse the array
                 const chatHistory = buildChatHistoryFromPreset(customOptions);
-                const chatStrings = chatHistory.map(m => m.content);
+                const chatStrings = chatHistory.map(m => m.content).reverse();
                 
-                const wiResult = await getWorldInfoPrompt(chatStrings, 0, false);
+                const wiResult = await getWorldInfoPrompt(chatStrings, max_context, false);
                 const wiText = (wiResult && typeof wiResult === 'object') ? 
                                (wiResult.worldInfoString || wiResult.worldInfoBefore || "") : 
                                (typeof wiResult === 'string' ? wiResult : "");
@@ -1161,7 +1162,7 @@ async function onImageSwiped(data) {
     
     incrementKazumaTask("Rendering Image...");
     try {
-        await generateWithComfy(prompt, { message: message, element: $(element) });
+        await generateWithComfy(prompt, { message: message, element: $(element).closest('.mes') });
     } finally {
         decrementKazumaTask();
     }
@@ -1545,7 +1546,7 @@ jQuery(async () => {
 
                 const $content = $(`
                     <div style="display: flex; flex-direction: column; gap: 10px;">
-                    <p><b>Edit prompt and generate as a new message:</b></p>
+                    <p><b>Edit prompt and add image to the current gallery:</b></p>
                     <textarea class="text_pole kazuma_regen_text" rows="8" style="width:100%; resize:vertical; font-family:monospace;">${promptText}</textarea>
                     </div>
                 `);
@@ -1555,7 +1556,7 @@ jQuery(async () => {
                 let editedPrompt = promptText;
                 $content.find('.kazuma_regen_text').on('input', function() { editedPrompt = $(this).val(); });
 
-                const popup = new Popup($content, POPUP_TYPE.CONFIRM, "New Image Response", { okButton: "New Response", cancelButton: "Cancel" });
+                const popup = new Popup($content, POPUP_TYPE.CONFIRM, "Edit & Re-roll Image", { okButton: "Generate", cancelButton: "Cancel" });
                 const confirmed = await popup.show();
 
                 if (confirmed) {
@@ -1563,7 +1564,11 @@ jQuery(async () => {
                     if (!finalPrompt) return;
                     incrementKazumaTask("Sending to ComfyUI...");
                     try {
-                        await generateWithComfy(finalPrompt, null);
+                        const target = {
+                            message: msg,
+                            element: $(`.mes[mesid="${mesId}"]`)
+                        };
+                        await generateWithComfy(finalPrompt, target);
                     } finally {
                         decrementKazumaTask();
                     }
